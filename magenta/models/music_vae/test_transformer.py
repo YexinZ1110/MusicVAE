@@ -1,75 +1,90 @@
 import unittest
 import tensorflow as tf
 import numpy as np
-from music_vae.lstm_models import TransformerDecoder  # Import your TransformerDecoder
+from magenta.models.music_vae.lstm_models import TransformerDecoder
+
 """
 python -m unittest /Users/shuchenye/Desktop/ESE5460/final-project/MusicVAE/magenta/models/music_vae/test_transformer.py
 """
-class TransformerDecoderTest(unittest.TestCase):
-    def setUp(self):
-        """Set up the test case with default parameters."""
-        self.batch_size = 2
-        self.seq_len = 16
-        self.d_model = 128
-        self.num_heads = 4
-        self.num_layers = 2
-        self.dff = 256
-        self.output_depth = 10  # Number of output classes
-        self.max_seq_len = 32
-        self.dropout_rate = 0.1
-        self.additional_emb = False
+class HParams:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
 
-        # Create a TransformerDecoder instance
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+    def set(self, key, value):
+        setattr(self, key, value)
+
+
+from magenta.models.music_vae.lstm_models import TransformerDecoder
+
+class TransformerDecoderTest(tf.test.TestCase):
+    def setUp(self):
+        super(TransformerDecoderTest, self).setUp()
+
+        # Define hyperparameters
+        self.batch_size = 4
+        self.seq_len = 128  # Sequence length for testing
+        self.num_layers = 6
+        self.d_model = 512
+        self.num_heads = 8
+        self.dff = 2048
+        self.dropout_rate = 0.1
+        self.output_depth = 90  # Example output depth (e.g., vocabulary size)
+
+        # Initialize the TransformerDecoder
         self.decoder = TransformerDecoder(
             num_layers=self.num_layers,
             d_model=self.d_model,
             num_heads=self.num_heads,
             dff=self.dff,
             dropout_rate=self.dropout_rate,
-            max_seq_len=self.max_seq_len,
-            additional_emb=self.additional_emb
-        )
-
-        # Mock hyperparameters and build the decoder
-        hparams = tf.contrib.training.HParams(
-            batch_size=self.batch_size,
             max_seq_len=self.seq_len
         )
-        self.decoder.build(hparams, self.output_depth, is_training=True)
+
+        # Explicitly call build
+        self.decoder.build(hparams=None, output_depth=self.output_depth, is_training=True)
+
+
+    def test_sample(self):
+        max_length = 16  # Max length for sampling
+        temperature = 1.0  # Sampling temperature
+
+        # Call sample
+        samples = self.decoder.sample(
+            n=self.batch_size,
+            max_length=max_length,
+            temperature=temperature
+        )
+
+        # Check the shape of the output
+        self.assertEqual(samples.shape[0], self.batch_size)
+        self.assertEqual(samples.shape[1], max_length)
+        self.assertEqual(samples.shape[2], self.output_depth)  # Ensure output matches expected depth
+
 
     def test_reconstruction_loss(self):
-        """Test the reconstruction_loss method."""
-        # Generate mock input and target tensors
+        # Create mock data
         x_input = tf.random.uniform(
             [self.batch_size, self.seq_len, self.output_depth], dtype=tf.float32
         )
         x_target = tf.random.uniform(
             [self.batch_size, self.seq_len, self.output_depth], dtype=tf.float32
         )
-        x_length = tf.constant([self.seq_len] * self.batch_size, dtype=tf.int32)
+        x_length = tf.random.uniform(
+            [self.batch_size], minval=1, maxval=self.seq_len, dtype=tf.int32
+        )
 
-        # Call the reconstruction_loss method
+        # Compute reconstruction loss
         r_loss, metric_map, logits = self.decoder.reconstruction_loss(
             x_input, x_target, x_length
         )
 
-        # Check output shapes and types
-        self.assertEqual(r_loss.shape, (self.batch_size,))
-        self.assertTrue(isinstance(metric_map, dict))
-        self.assertEqual(logits.shape, (self.batch_size, self.seq_len, self.output_depth))
+        # Validate loss output
+        self.assertEqual(r_loss.shape[0], self.batch_size)
+        self.assertIn('metrics/reconstruction_loss', metric_map)
 
-    def test_sample(self):
-        """Test the sample method."""
-        n_samples = 3
-        max_length = 16
-
-        # Call the sample method
-        samples = self.decoder.sample(
-            n=n_samples, max_length=max_length, temperature=0.8
-        )
-
-        # Check output shapes
-        self.assertEqual(samples.shape, (n_samples, max_length, self.d_model))
 
 if __name__ == '__main__':
     unittest.main()

@@ -407,12 +407,16 @@ class TransformerDecoder(base_model.BaseDecoder):
 
   def _create_positional_encoding(self, max_seq_len, d_model):
     """Generate sinusoidal positional encoding."""
-    positions = tf.range(max_seq_len)[:, tf.newaxis]
-    dimensions = tf.range(d_model)[tf.newaxis, :]
-    angle_rads = positions / tf.pow(10000, (2 * (dimensions // 2)) / tf.cast(d_model, tf.float32))
-    angle_rads[:, 0::2] = tf.math.sin(angle_rads[:, 0::2])
-    angle_rads[:, 1::2] = tf.math.cos(angle_rads[:, 1::2])
-    return tf.cast(angle_rads[tf.newaxis, ...], tf.float32)
+    positions = tf.cast(tf.range(max_seq_len)[:, tf.newaxis], tf.float32)  # [max_seq_len, 1]
+    dimensions = tf.cast(tf.range(d_model)[tf.newaxis, :], tf.float32)  # [1, d_model]
+    # Compute the angle rates
+    angle_rads = positions / tf.pow(10000.0, (2 * (dimensions // 2)) / tf.cast(d_model, tf.float32))
+    # Apply sine to even indices and cosine to odd indices
+    sines = tf.math.sin(angle_rads[:, 0::2])
+    cosines = tf.math.cos(angle_rads[:, 1::2])
+    # Combine sine and cosine into the final positional encoding
+    pos_encoding = tf.concat([sines, cosines], axis=-1)
+    return tf.expand_dims(pos_encoding, axis=0)  # Add batch dimension
 
   def _create_lookahead_mask(self, seq_len):
     """Create a causal mask to prevent attending to future tokens."""

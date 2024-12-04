@@ -52,9 +52,17 @@ we plan to train hierdec-mel_16bar and hierdec-trio_16bar
 """
 CONFIG_MAP['hierdec-mel_16bar'] = Config(
     model=MusicVAE(
-        lstm_models.BidirectionalLstmEncoder(),  # Retain the LSTM encoder if needed
+        lstm_models.BidirectionalLstmEncoder(),  # Retain the LSTM encoder
         lstm_models.HierarchicalLstmDecoder(
-            lstm_models.TransformerDecoder(),  # Replace the inner decoder with TransformerDecoder
+            lstm_models.TransformerDecoder(
+                num_layers=6,       # Number of Transformer layers
+                d_model=512,        # Transformer model dimension
+                num_heads=8,        # Number of attention heads
+                dff=2048,           # Feed-forward network dimension
+                dropout_rate=0.1,   # Dropout rate
+                max_seq_len=256,    # Maximum sequence length
+                additional_emb=False  # Additional embeddings
+            ),
             level_lengths=[16, 16],  # Hierarchical levels
             disable_autoregression=True)),  # Adjust as needed
     hparams=merge_hparams(
@@ -63,11 +71,6 @@ CONFIG_MAP['hierdec-mel_16bar'] = Config(
             batch_size=512,
             max_seq_len=256,  # 16 bars with 16 steps per bar
             z_size=512,
-            num_layers=6,  # Number of Transformer layers
-            d_model=512,  # Transformer model dimension
-            num_heads=8,  # Number of attention heads
-            dff=2048,  # Feed-forward network dimension
-            dropout_rate=0.1,  # Dropout rate
             free_bits=256,
             max_beta=0.2,
         )),
@@ -83,13 +86,38 @@ CONFIG_MAP['hierdec-mel_16bar'] = Config(
 
 CONFIG_MAP['hierdec-trio_16bar'] = Config(
     model=MusicVAE(
-        lstm_models.BidirectionalLstmEncoder(),  # Retain the LSTM encoder if needed
+        lstm_models.BidirectionalLstmEncoder(),  # Retain the LSTM encoder
         lstm_models.HierarchicalLstmDecoder(
             lstm_models.SplitMultiOutLstmDecoder(
                 core_decoders=[
-                    lstm_models.TransformerDecoder(),  # Transformer for melody
-                    lstm_models.TransformerDecoder(),  # Transformer for bass
-                    lstm_models.TransformerDecoder()],  # Transformer for drums
+                    lstm_models.TransformerDecoder(
+                        num_layers=6,
+                        d_model=512,
+                        num_heads=8,
+                        dff=2048,
+                        dropout_rate=0.1,
+                        max_seq_len=256,
+                        additional_emb=False
+                    ),  # Transformer for melody
+                    lstm_models.TransformerDecoder(
+                        num_layers=6,
+                        d_model=512,
+                        num_heads=8,
+                        dff=2048,
+                        dropout_rate=0.1,
+                        max_seq_len=256,
+                        additional_emb=False
+                    ),  # Transformer for bass
+                    lstm_models.TransformerDecoder(
+                        num_layers=6,
+                        d_model=512,
+                        num_heads=8,
+                        dff=2048,
+                        dropout_rate=0.1,
+                        max_seq_len=256,
+                        additional_emb=False
+                    )  # Transformer for drums
+                ],
                 output_depths=[
                     90,  # Melody
                     90,  # Bass
@@ -103,11 +131,6 @@ CONFIG_MAP['hierdec-trio_16bar'] = Config(
             batch_size=256,
             max_seq_len=256,  # 16 bars with 16 steps per bar
             z_size=512,
-            num_layers=6,  # Number of Transformer layers
-            d_model=512,  # Transformer model dimension
-            num_heads=8,  # Number of attention heads
-            dff=2048,  # Feed-forward network dimension
-            dropout_rate=0.1,  # Dropout rate
             free_bits=256,
             max_beta=0.2,
         )),
