@@ -46,6 +46,82 @@ def update_config(config, update_dict):
 CONFIG_MAP = {}
 
 
+"""
+For transformer decoder,
+we plan to train hierdec-mel_16bar and hierdec-trio_16bar
+"""
+CONFIG_MAP['hierdec-mel_16bar'] = Config(
+    model=MusicVAE(
+        lstm_models.BidirectionalLstmEncoder(),  # Retain the LSTM encoder if needed
+        lstm_models.HierarchicalLstmDecoder(
+            lstm_models.TransformerDecoder(),  # Replace the inner decoder with TransformerDecoder
+            level_lengths=[16, 16],  # Hierarchical levels
+            disable_autoregression=True)),  # Adjust as needed
+    hparams=merge_hparams(
+        lstm_models.get_default_hparams(),
+        HParams(
+            batch_size=512,
+            max_seq_len=256,  # 16 bars with 16 steps per bar
+            z_size=512,
+            num_layers=6,  # Number of Transformer layers
+            d_model=512,  # Transformer model dimension
+            num_heads=8,  # Number of attention heads
+            dff=2048,  # Feed-forward network dimension
+            dropout_rate=0.1,  # Dropout rate
+            free_bits=256,
+            max_beta=0.2,
+        )),
+    note_sequence_augmenter=None,
+    data_converter=data.OneHotMelodyConverter(
+        skip_polyphony=False,
+        max_bars=100,  # Truncate long melodies before slicing
+        slice_bars=16,
+        steps_per_quarter=4),
+    train_examples_path=None,
+    eval_examples_path=None,
+)
+
+CONFIG_MAP['hierdec-trio_16bar'] = Config(
+    model=MusicVAE(
+        lstm_models.BidirectionalLstmEncoder(),  # Retain the LSTM encoder if needed
+        lstm_models.HierarchicalLstmDecoder(
+            lstm_models.SplitMultiOutLstmDecoder(
+                core_decoders=[
+                    lstm_models.TransformerDecoder(),  # Transformer for melody
+                    lstm_models.TransformerDecoder(),  # Transformer for bass
+                    lstm_models.TransformerDecoder()],  # Transformer for drums
+                output_depths=[
+                    90,  # Melody
+                    90,  # Bass
+                    512,  # Drums
+                ]),
+            level_lengths=[16, 16],  # Hierarchical levels
+            disable_autoregression=True)),
+    hparams=merge_hparams(
+        lstm_models.get_default_hparams(),
+        HParams(
+            batch_size=256,
+            max_seq_len=256,  # 16 bars with 16 steps per bar
+            z_size=512,
+            num_layers=6,  # Number of Transformer layers
+            d_model=512,  # Transformer model dimension
+            num_heads=8,  # Number of attention heads
+            dff=2048,  # Feed-forward network dimension
+            dropout_rate=0.1,  # Dropout rate
+            free_bits=256,
+            max_beta=0.2,
+        )),
+    note_sequence_augmenter=None,
+    data_converter=data.TrioConverter(
+        steps_per_quarter=4,
+        slice_bars=16,
+        gap_bars=2),
+    train_examples_path=None,
+    eval_examples_path=None,
+)
+
+
+
 # Melody
 CONFIG_MAP['cat-mel_2bar_small'] = Config(
     model=MusicVAE(lstm_models.BidirectionalLstmEncoder(),
@@ -266,38 +342,38 @@ CONFIG_MAP['flat-trio_16bar'] = Config(
     eval_examples_path=None,
 )
 
-CONFIG_MAP['hierdec-trio_16bar'] = Config(
-    model=MusicVAE(
-        lstm_models.BidirectionalLstmEncoder(),
-        lstm_models.HierarchicalLstmDecoder(
-            lstm_models.SplitMultiOutLstmDecoder(
-                core_decoders=[
-                    lstm_models.CategoricalLstmDecoder(),
-                    lstm_models.CategoricalLstmDecoder(),
-                    lstm_models.CategoricalLstmDecoder()],
-                output_depths=[
-                    90,  # melody
-                    90,  # bass
-                    512,  # drums
-                ]),
-            level_lengths=[16, 16],
-            disable_autoregression=True)),
-    hparams=merge_hparams(
-        lstm_models.get_default_hparams(),
-        HParams(
-            batch_size=256,
-            max_seq_len=256,
-            z_size=512,
-            enc_rnn_size=[2048, 2048],
-            dec_rnn_size=[1024, 1024],
-            free_bits=256,
-            max_beta=0.2,
-        )),
-    note_sequence_augmenter=None,
-    data_converter=trio_16bar_converter,
-    train_examples_path=None,
-    eval_examples_path=None,
-)
+# CONFIG_MAP['hierdec-trio_16bar'] = Config(
+#     model=MusicVAE(
+#         lstm_models.BidirectionalLstmEncoder(),
+#         lstm_models.HierarchicalLstmDecoder(
+#             lstm_models.SplitMultiOutLstmDecoder(
+#                 core_decoders=[
+#                     lstm_models.CategoricalLstmDecoder(),
+#                     lstm_models.CategoricalLstmDecoder(),
+#                     lstm_models.CategoricalLstmDecoder()],
+#                 output_depths=[
+#                     90,  # melody
+#                     90,  # bass
+#                     512,  # drums
+#                 ]),
+#             level_lengths=[16, 16],
+#             disable_autoregression=True)),
+#     hparams=merge_hparams(
+#         lstm_models.get_default_hparams(),
+#         HParams(
+#             batch_size=256,
+#             max_seq_len=256,
+#             z_size=512,
+#             enc_rnn_size=[2048, 2048],
+#             dec_rnn_size=[1024, 1024],
+#             free_bits=256,
+#             max_beta=0.2,
+#         )),
+#     note_sequence_augmenter=None,
+#     data_converter=trio_16bar_converter,
+#     train_examples_path=None,
+#     eval_examples_path=None,
+# )
 
 CONFIG_MAP['hier-trio_16bar'] = Config(
     model=MusicVAE(
@@ -361,29 +437,29 @@ CONFIG_MAP['flat-mel_16bar'] = Config(
     eval_examples_path=None,
 )
 
-CONFIG_MAP['hierdec-mel_16bar'] = Config(
-    model=MusicVAE(
-        lstm_models.BidirectionalLstmEncoder(),
-        lstm_models.HierarchicalLstmDecoder(
-            lstm_models.CategoricalLstmDecoder(),
-            level_lengths=[16, 16],
-            disable_autoregression=True)),
-    hparams=merge_hparams(
-        lstm_models.get_default_hparams(),
-        HParams(
-            batch_size=512,
-            max_seq_len=256,
-            z_size=512,
-            enc_rnn_size=[2048, 2048],
-            dec_rnn_size=[1024, 1024],
-            free_bits=256,
-            max_beta=0.2,
-        )),
-    note_sequence_augmenter=None,
-    data_converter=mel_16bar_converter,
-    train_examples_path=None,
-    eval_examples_path=None,
-)
+# CONFIG_MAP['hierdec-mel_16bar'] = Config(
+#     model=MusicVAE(
+#         lstm_models.BidirectionalLstmEncoder(),
+#         lstm_models.HierarchicalLstmDecoder(
+#             lstm_models.CategoricalLstmDecoder(),
+#             level_lengths=[16, 16],
+#             disable_autoregression=True)),
+#     hparams=merge_hparams(
+#         lstm_models.get_default_hparams(),
+#         HParams(
+#             batch_size=512,
+#             max_seq_len=256,
+#             z_size=512,
+#             enc_rnn_size=[2048, 2048],
+#             dec_rnn_size=[1024, 1024],
+#             free_bits=256,
+#             max_beta=0.2,
+#         )),
+#     note_sequence_augmenter=None,
+#     data_converter=mel_16bar_converter,
+#     train_examples_path=None,
+#     eval_examples_path=None,
+# )
 
 CONFIG_MAP['hier-mel_16bar'] = Config(
     model=MusicVAE(

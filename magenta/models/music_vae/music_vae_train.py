@@ -81,7 +81,9 @@ flags.DEFINE_string(
     'The threshold for what messages will be logged: '
     'DEBUG, INFO, WARN, ERROR, or FATAL.')
 
-
+"""
+This function is just for debugging
+"""
 # Should not be called from within the graph to avoid redundant summaries.
 def _trial_summary(hparams, examples_path, output_dir):
   """Writes a tensorboard text summary of the trial."""

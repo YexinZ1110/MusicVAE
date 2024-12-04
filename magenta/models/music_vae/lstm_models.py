@@ -205,6 +205,365 @@ class HierarchicalLstmEncoder(base_model.BaseEncoder):
 # DECODERS
 
 
+"""
+Current LSTEM DECODER
+latent embeddings z
+
+key components:
+- reconstruction loss (rnn_outpput (model's output) & x_target (target sequence))
+- sampling (iteratively sampling the next time step's output based on the current state and inputs)
+- hierarchical decoding (multiple levels of LSTMs)
+"""
+
+"""
+NEW Transformers features - Sliding Window
+Transformers require fixed-length inputs. 
+Since music sequences are often variable in length, 
+we need a sliding window to split sequences 
+into overlapping chunks of fixed size.
+"""
+
+class RelativeGlobalAttention(tf.keras.layers.Layer):
+  """Relative Global Attention layer adapted from Music Transformer (Huang et al., 2018)."""
+  def __init__(self, h, d, max_seq=2048, add_emb=False, **kwargs):
+    """
+    Args:
+        h: Number of attention heads.
+        d: Dimensionality of the model.
+        max_seq: Maximum sequence length for relative embeddings.
+        add_emb: Whether to add an additional embedding layer.
+    """
+    super().__init__(**kwargs)
+    self.h = h
+    self.d = d
+    self.dh = d // h
+    self.max_seq = max_seq
+    self.additional_emb = add_emb
+
+    # Linear transformations for Q, K, V
+    self.Wq = tf.keras.layers.Dense(d)
+    self.Wk = tf.keras.layers.Dense(d)
+    self.Wv = tf.keras.layers.Dense(d)
+    self.fc = tf.keras.layers.Dense(d)
+
+    if self.additional_emb:
+        self.Radd = None  # Add additional relative embedding if necessary
+    self.E = None  # Relative positional embedding
+
+  def build(self, input_shape):
+    # Initialize relative position embedding
+    self.E = self.add_weight('emb', shape=[self.max_seq, self.dh], initializer='random_normal')
+
+  def call(self, inputs, mask=None):
+    """
+    Forward pass for RelativeGlobalAttention.
+
+    Args:
+        inputs: List of tensors [Q, K, V].
+        mask: Optional mask tensor.
+
+    Returns:
+        output: Output of the attention mechanism.
+        attention_weights: Attention weights.
+    """
+    q, k, v = inputs
+
+    # Compute Q, K, V transformations
+    q = self.Wq(q)
+    k = self.Wk(k)
+    v = self.Wv(v)
+
+    # Reshape for multi-head attention
+    q = tf.reshape(q, (q.shape[0], q.shape[1], self.h, -1))
+    q = tf.transpose(q, (0, 2, 1, 3))  # [batch, heads, seq_len, dh]
+
+    k = tf.reshape(k, (k.shape[0], k.shape[1], self.h, -1))
+    k = tf.transpose(k, (0, 2, 1, 3))
+
+    v = tf.reshape(v, (v.shape[0], v.shape[1], self.h, -1))
+    v = tf.transpose(v, (0, 2, 1, 3))
+
+    # Relative positional encoding
+    len_q, len_k = q.shape[2], k.shape[2]
+    E = self._get_relative_embedding(len_q, len_k)
+    QE = tf.einsum('bhld,md->bhlm', q, E)
+    QE = self._qe_masking(QE, len_q, len_k)
+    Srel = self._skewing(QE)
+
+    # Scaled dot-product attention with relative position
+    logits = tf.matmul(q, k, transpose_b=True) + Srel
+    logits = logits / tf.math.sqrt(float(self.dh))
+
+    if mask is not None:
+        logits += (mask * -1e9)
+
+    attention_weights = tf.nn.softmax(logits, axis=-1)
+    attention_output = tf.matmul(attention_weights, v)
+
+    # Concatenate multi-head outputs
+    attention_output = tf.transpose(attention_output, (0, 2, 1, 3))
+    attention_output = tf.reshape(attention_output, (attention_output.shape[0], -1, self.d))
+
+    # Final linear projection
+    output = self.fc(attention_output)
+    return output, attention_weights
+
+  def _get_relative_embedding(self, len_q, len_k):
+    start = max(0, self.max_seq - len_q)
+    return self.E[start:start + len_k]
+
+  @staticmethod
+  def _qe_masking(qe, len_q, len_k):
+    mask = tf.sequence_mask(tf.range(len_k - 1, len_k - len_q - 1, -1), len_k)
+    mask = tf.logical_not(mask)
+    mask = tf.cast(mask, tf.float32)
+    return mask * qe
+
+  def _skewing(self, tensor):
+    padded = tf.pad(tensor, [[0, 0], [0, 0], [0, 0], [1, 0]])
+    reshaped = tf.reshape(padded, [-1, padded.shape[1], padded.shape[-1], padded.shape[-2]])
+    Srel = reshaped[:, :, 1:, :]
+    return Srel[:, :, :, :tensor.shape[-1]]
+
+
+class TransformerDecoderLayer(tf.keras.layers.Layer):
+  """Single layer of Transformer Decoder with RelativeGlobalAttention."""
+  def __init__(self, d_model, num_heads, dff, dropout_rate=0.1, max_seq=2048, additional_emb=False):
+    super(TransformerDecoderLayer, self).__init__()
+
+    self.self_attention = RelativeGlobalAttention(h=num_heads, d=d_model, max_seq=max_seq, add_emb=additional_emb)
+    self.encoder_attention = RelativeGlobalAttention(h=num_heads, d=d_model, max_seq=max_seq, add_emb=additional_emb)
+
+    self.ffn_pre = tf.keras.layers.Dense(dff, activation=tf.nn.relu)
+    self.ffn_post = tf.keras.layers.Dense(d_model)
+
+    self.layernorm1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+    self.layernorm3 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+
+    self.dropout1 = tf.keras.layers.Dropout(dropout_rate)
+    self.dropout2 = tf.keras.layers.Dropout(dropout_rate)
+    self.dropout3 = tf.keras.layers.Dropout(dropout_rate)
+
+  def call(self, x, encoder_output=None, mask=None, lookahead_mask=None, training=False, return_attention=False):
+    # Self-attention
+    self_attn_out, self_attn_weights = self.self_attention([x, x, x], mask=lookahead_mask)
+    self_attn_out = self.dropout1(self_attn_out, training=training)
+    out1 = self.layernorm1(self_attn_out + x)
+
+    # Encoder-Decoder Attention
+    if encoder_output is not None:
+      enc_dec_attn_out, enc_dec_attn_weights = self.encoder_attention([out1, encoder_output, encoder_output], mask=mask)
+    else:
+      enc_dec_attn_out, enc_dec_attn_weights = self.encoder_attention([out1, out1, out1], mask=mask)
+
+    enc_dec_attn_out = self.dropout2(enc_dec_attn_out, training=training)
+    out2 = self.layernorm2(enc_dec_attn_out + out1)
+
+    # Feed-Forward Network
+    ffn_out = self.ffn_pre(out2)
+    ffn_out = self.ffn_post(ffn_out)
+    ffn_out = self.dropout3(ffn_out, training=training)
+    out = self.layernorm3(ffn_out + out2)
+
+    if return_attention:
+      return out, self_attn_weights, enc_dec_attn_weights
+    else:
+      return out
+
+
+class TransformerDecoder(base_model.BaseDecoder):
+  """Transformer-based Decoder using Relative Global Attention."""
+  
+  def __init__(self, num_layers, d_model, num_heads, dff, dropout_rate=0.1, max_seq_len=2048, additional_emb=False):
+    super(TransformerDecoder, self).__init__()
+    self.num_layers = num_layers
+    self.d_model = d_model
+    self.num_heads = num_heads
+    self.dff = dff
+    self.dropout_rate = dropout_rate
+    self.max_seq_len = max_seq_len
+    self.additional_emb = additional_emb
+
+    # Embedding and positional encoding
+    self.embedding = tf.keras.layers.Embedding(input_dim=d_model, output_dim=d_model)
+    self.positional_encoding = self._create_positional_encoding(max_seq_len, d_model)
+    self.dropout = tf.keras.layers.Dropout(dropout_rate)
+
+    # Transformer decoder layers
+    self.layers = [
+      TransformerDecoderLayer(d_model, num_heads, dff, dropout_rate, max_seq_len, additional_emb)
+      for _ in range(num_layers)
+    ]
+
+    # Output projection layer
+    self.output_layer = tf.keras.layers.Dense(d_model)
+
+  def build(self, hparams, output_depth, is_training=True):
+    """Build the TransformerDecoder with specific hyperparameters."""
+    self.is_training = is_training
+    self.output_depth = output_depth
+    self.hparams = hparams
+
+  def _create_positional_encoding(self, max_seq_len, d_model):
+    """Generate sinusoidal positional encoding."""
+    positions = tf.range(max_seq_len)[:, tf.newaxis]
+    dimensions = tf.range(d_model)[tf.newaxis, :]
+    angle_rads = positions / tf.pow(10000, (2 * (dimensions // 2)) / tf.cast(d_model, tf.float32))
+    angle_rads[:, 0::2] = tf.math.sin(angle_rads[:, 0::2])
+    angle_rads[:, 1::2] = tf.math.cos(angle_rads[:, 1::2])
+    return tf.cast(angle_rads[tf.newaxis, ...], tf.float32)
+
+  def _create_lookahead_mask(self, seq_len):
+    """Create a causal mask to prevent attending to future tokens."""
+    return tf.linalg.band_part(tf.ones((seq_len, seq_len)), -1, 0)
+
+  def call(self, x, encoder_output=None, mask=None, lookahead_mask=None, window_size=128, overlap=0, training=False):
+    """Forward pass for TransformerDecoder.
+
+    Args:
+        x: Input tensor of shape `[batch_size, seq_len, d_model]`.
+        encoder_output: Encoder output for encoder-decoder attention.
+        mask: Encoder-decoder attention mask.
+        lookahead_mask: Decoder self-attention mask.
+        window_size: Size of each sliding window.
+        overlap: Number of overlapping tokens between windows.
+        training: Boolean indicating whether in training mode.
+
+    Returns:
+        logits: Output logits of shape `[batch_size, seq_len, d_model]`.
+    """
+    seq_len = tf.shape(x)[1]
+    step_size = window_size - overlap
+
+    outputs = []
+    start = 0
+
+    while start < seq_len:
+      end = min(start + window_size, seq_len)
+      chunk = x[:, start:end, :]
+      chunk_lookahead_mask = self._create_lookahead_mask(end - start)
+
+      # Decode the current chunk
+      chunk_output = chunk
+      for layer in self.layers:
+          chunk_output = layer(chunk_output, encoder_output, mask, chunk_lookahead_mask, training)
+
+      outputs.append(chunk_output)
+      start += step_size
+
+    # Concatenate outputs from all windows
+    outputs = tf.concat(outputs, axis=1)
+
+    # Project final output to the desired dimension
+    logits = self.output_layer(outputs)
+    return logits
+
+  def sample(self, n, max_length=None, z=None, c_input=None, temperature=1.0, start_inputs=None, end_fn=None, window_size=128, overlap=0):
+    """Sample sequences from the TransformerDecoder.
+
+    Args:
+        n: Number of sequences to sample.
+        max_length: Maximum sequence length.
+        z: Optional latent vectors for conditional generation.
+        c_input: Optional control sequence.
+        temperature: Sampling temperature for softmax.
+        start_inputs: Initial input tokens for generation.
+        end_fn: Function to determine end of sequence.
+
+    Returns:
+        samples: Generated sequences of shape `[n, max_length, d_model]`.
+    """
+    if start_inputs is None:
+      start_inputs = tf.zeros([n, 1, self.d_model], dtype=tf.float32)
+
+    outputs = start_inputs
+    for t in range(max_length):
+      lookahead_mask = self._create_lookahead_mask(tf.shape(outputs)[1])
+
+      # Decode step-by-step
+      logits = self.call(
+          outputs, encoder_output=c_input, lookahead_mask=lookahead_mask, training=False,
+          window_size=window_size, overlap=overlap
+        )
+      logits = logits[:, -1, :] / temperature
+
+      # Sample next token
+      next_token = tf.random.categorical(logits, num_samples=1)
+      next_token = tf.one_hot(next_token, depth=self.output_depth)
+
+      # Append to outputs
+      outputs = tf.concat([outputs, tf.expand_dims(next_token, 1)], axis=1)
+
+      # Check for sequence end
+      if end_fn is not None and tf.reduce_all(end_fn(next_token)):
+        break
+
+    return outputs
+
+  def reconstruction_loss(self, x_input, x_target, x_length, z=None, c_input=None, window_size=128, overlap=0):
+    """Compute reconstruction loss for the TransformerDecoder.
+
+    Args:
+        x_input: Input sequence tensor `[batch_size, seq_len, output_depth]`.
+        x_target: Target sequence tensor `[batch_size, seq_len, output_depth]`.
+        x_length: Sequence lengths for each batch element.
+        z: Latent vectors (optional).
+        c_input: Control inputs (optional).
+
+    Returns:
+        r_loss: Reconstruction loss for each sequence.
+        metric_map: Metrics for logging (e.g., accuracy).
+        logits: Output logits from the decoder.
+    """
+    batch_size = tf.shape(x_input)[0]
+    seq_len = tf.shape(x_input)[1]
+    step_size = window_size - overlap
+
+    # Initialize loss and logits storage
+    total_loss = []
+    all_logits = []
+
+    start = 0
+    while start < seq_len:
+      end = min(start + window_size, seq_len)
+
+      # Extract the current window for input and target
+      x_input_window = x_input[:, start:end, :]
+      x_target_window = x_target[:, start:end, :]
+
+      # Generate lookahead mask for the current window
+      lookahead_mask = self._create_lookahead_mask(end - start)
+
+      # Decode the current window
+      logits_window = self.call(
+        x_input_window, encoder_output=c_input, lookahead_mask=lookahead_mask, training=True,
+        window_size=window_size, overlap=overlap
+      )
+
+      # Compute loss for the current window
+      loss_window = tf.nn.softmax_cross_entropy_with_logits(
+        labels=x_target_window, logits=logits_window
+      )
+      total_loss.append(tf.reduce_mean(loss_window, axis=-1))  # Append per-sequence loss
+      all_logits.append(logits_window)
+
+      start += step_size
+
+    # Concatenate logits from all windows for metrics
+    all_logits = tf.concat(all_logits, axis=1)
+
+    # Combine loss across windows
+    r_loss = tf.reduce_mean(tf.concat(total_loss, axis=-1))
+
+    # Metrics for logging
+    metric_map = {
+        'metrics/reconstruction_loss': (tf.reduce_mean(r_loss), tf.no_op())
+    }
+
+    return r_loss, metric_map, all_logits
+
+
 class BaseLstmDecoder(base_model.BaseDecoder):
   """Abstract LSTM Decoder class.
 
