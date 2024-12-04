@@ -2,7 +2,9 @@ import unittest
 import tensorflow as tf
 import numpy as np
 from music_vae.lstm_models import TransformerDecoder  # Import your TransformerDecoder
-
+"""
+python -m unittest /Users/shuchenye/Desktop/ESE5460/final-project/MusicVAE/magenta/models/music_vae/test_transformer.py
+"""
 class TransformerDecoderTest(unittest.TestCase):
     def setUp(self):
         """Set up the test case with default parameters."""
