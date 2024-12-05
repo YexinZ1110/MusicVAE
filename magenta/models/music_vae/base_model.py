@@ -250,7 +250,9 @@ class MusicVAE(object):
     else:  # unconditional, decoder-only generation
       kl_div = tf.zeros([batch_size, 1], dtype=tf.float32)
       z = None
-
+    
+    # print('x_input:', x_input)  # x_input: Tensor("Pad:0", shape=(512, ?, 90), dtype=float32)
+    # print("x_input shape:", x_input.shape)  # x_input shape: (512, ?, 90)
     r_loss, metric_map = self.decoder.reconstruction_loss(
         x_input, x_target, x_length, z, control_sequence)[0:2]
 

@@ -50,6 +50,43 @@ CONFIG_MAP = {}
 For transformer decoder,
 we plan to train hierdec-mel_16bar and hierdec-trio_16bar
 """
+
+CONFIG_MAP['cat-mel_2bar_small'] = Config(
+    model=MusicVAE(
+        lstm_models.BidirectionalLstmEncoder(),  # Retain the LSTM encoder if needed
+        lstm_models.TransformerDecoder(
+            num_layers=6,           # Number of Transformer layers
+            d_model=256,            # Model dimensionality
+            num_heads=8,            # Number of attention heads
+            dff=1024,               # Feed-forward network dimensionality
+            dropout_rate=0.1,       # Dropout rate
+            max_seq_len=32          # Maximum sequence length (2 bars)
+        )),
+    hparams=merge_hparams(
+        lstm_models.get_default_hparams(),
+        HParams(
+            batch_size=512,
+            max_seq_len=32,          # 2 bars w/ 16 steps per bar
+            z_size=256,
+            enc_rnn_size=[512],
+            free_bits=0,
+            max_beta=0.2,
+            beta_rate=0.99999,
+            sampling_schedule='inverse_sigmoid',
+            sampling_rate=1000,
+        )),
+    note_sequence_augmenter=data.NoteSequenceAugmenter(transpose_range=(-5, 5)),
+    data_converter=data.OneHotMelodyConverter(
+        valid_programs=data.MEL_PROGRAMS,
+        skip_polyphony=False,
+        max_bars=100,  # Truncate long melodies before slicing.
+        slice_bars=2,
+        steps_per_quarter=4),
+    train_examples_path=None,
+    eval_examples_path=None,
+)
+
+
 CONFIG_MAP['hierdec-mel_16bar'] = Config(
     model=MusicVAE(
         lstm_models.BidirectionalLstmEncoder(),  # Retain the LSTM encoder
@@ -146,33 +183,33 @@ CONFIG_MAP['hierdec-trio_16bar'] = Config(
 
 
 # Melody
-CONFIG_MAP['cat-mel_2bar_small'] = Config(
-    model=MusicVAE(lstm_models.BidirectionalLstmEncoder(),
-                   lstm_models.CategoricalLstmDecoder()),
-    hparams=merge_hparams(
-        lstm_models.get_default_hparams(),
-        HParams(
-            batch_size=512,
-            max_seq_len=32,  # 2 bars w/ 16 steps per bar
-            z_size=256,
-            enc_rnn_size=[512],
-            dec_rnn_size=[256, 256],
-            free_bits=0,
-            max_beta=0.2,
-            beta_rate=0.99999,
-            sampling_schedule='inverse_sigmoid',
-            sampling_rate=1000,
-        )),
-    note_sequence_augmenter=data.NoteSequenceAugmenter(transpose_range=(-5, 5)),
-    data_converter=data.OneHotMelodyConverter(
-        valid_programs=data.MEL_PROGRAMS,
-        skip_polyphony=False,
-        max_bars=100,  # Truncate long melodies before slicing.
-        slice_bars=2,
-        steps_per_quarter=4),
-    train_examples_path=None,
-    eval_examples_path=None,
-)
+# CONFIG_MAP['cat-mel_2bar_small'] = Config(
+#     model=MusicVAE(lstm_models.BidirectionalLstmEncoder(),
+#                    lstm_models.CategoricalLstmDecoder()),
+#     hparams=merge_hparams(
+#         lstm_models.get_default_hparams(),
+#         HParams(
+#             batch_size=512,
+#             max_seq_len=32,  # 2 bars w/ 16 steps per bar
+#             z_size=256,
+#             enc_rnn_size=[512],
+#             dec_rnn_size=[256, 256],
+#             free_bits=0,
+#             max_beta=0.2,
+#             beta_rate=0.99999,
+#             sampling_schedule='inverse_sigmoid',
+#             sampling_rate=1000,
+#         )),
+#     note_sequence_augmenter=data.NoteSequenceAugmenter(transpose_range=(-5, 5)),
+#     data_converter=data.OneHotMelodyConverter(
+#         valid_programs=data.MEL_PROGRAMS,
+#         skip_polyphony=False,
+#         max_bars=100,  # Truncate long melodies before slicing.
+#         slice_bars=2,
+#         steps_per_quarter=4),
+#     train_examples_path=None,
+#     eval_examples_path=None,
+# )
 
 CONFIG_MAP['cat-mel_2bar_big'] = Config(
     model=MusicVAE(lstm_models.BidirectionalLstmEncoder(),

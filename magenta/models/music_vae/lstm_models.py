@@ -25,6 +25,7 @@ from magenta.models.music_vae import lstm_utils
 import numpy as np
 import tensorflow.compat.v1 as tf
 import tensorflow_probability as tfp
+tf.disable_eager_execution()
 
 
 # ENCODERS
@@ -233,7 +234,7 @@ class RelativeGlobalAttention(tf.keras.layers.Layer):
         max_seq: Maximum sequence length for relative embeddings.
         add_emb: Whether to add an additional embedding layer.
     """
-    super().__init__(**kwargs)
+    super(RelativeGlobalAttention, self).__init__(dynamic=True, **kwargs)
     self.h = h
     self.d = d
     self.dh = d // h
@@ -267,24 +268,34 @@ class RelativeGlobalAttention(tf.keras.layers.Layer):
         attention_weights: Attention weights.
     """
     q, k, v = inputs
+    # print("q:", q)
+    # print("q type:", type(q))
+    # print("d:", self.d)
 
     # Compute Q, K, V transformations
     q = self.Wq(q)
     k = self.Wk(k)
     v = self.Wv(v)
 
-    # Reshape for multi-head attention
-    q = tf.reshape(q, (q.shape[0], q.shape[1], self.h, -1))
-    q = tf.transpose(q, (0, 2, 1, 3))  # [batch, heads, seq_len, dh]
+    q_shape = tf.shape(q)
+    len_q = q_shape[1]
+    len_k = tf.shape(k)[1]
 
-    k = tf.reshape(k, (k.shape[0], k.shape[1], self.h, -1))
-    k = tf.transpose(k, (0, 2, 1, 3))
+    # # Reshape for multi-head attention
+    # q_shape = tf.shape(q)
+    # q = tf.reshape(q, (q_shape[0], q_shape[1], self.h, self.dh))
+    # q = tf.transpose(q, (0, 2, 1, 3))  # [batch, heads, seq_len, dh]
 
-    v = tf.reshape(v, (v.shape[0], v.shape[1], self.h, -1))
-    v = tf.transpose(v, (0, 2, 1, 3))
+    # k_shape = tf.shape(k)
+    # k = tf.reshape(k, (k_shape[0], k_shape[1], self.h, self.dh))
+    # k = tf.transpose(k, (0, 2, 1, 3))
+
+    # v_shape = tf.shape(v)
+    # v = tf.reshape(v, (v_shape[0], v_shape[1], self.h, self.dh))
+    # v = tf.transpose(v, (0, 2, 1, 3))
 
     # Relative positional encoding
-    len_q, len_k = q.shape[2], k.shape[2]
+    # len_q, len_k = q.shape[2], k.shape[2]
     E = self._get_relative_embedding(len_q, len_k)
     QE = tf.einsum('bhld,md->bhlm', q, E)
     QE = self._qe_masking(QE, len_q, len_k)
@@ -309,21 +320,38 @@ class RelativeGlobalAttention(tf.keras.layers.Layer):
     return output, attention_weights
 
   def _get_relative_embedding(self, len_q, len_k):
-    start = max(0, self.max_seq - len_q)
+    start = tf.maximum(0, self.max_seq - len_q)
     return self.E[start:start + len_k]
 
   @staticmethod
   def _qe_masking(qe, len_q, len_k):
-    mask = tf.sequence_mask(tf.range(len_k - 1, len_k - len_q - 1, -1), len_k)
+    len_q = tf.shape(qe)[2]
+    len_k = tf.shape(qe)[3]
+
+    # range_tensor = tf.range(len_k - 1, len_k - len_q - 1, -1)
+    range_tensor = tf.range(
+      len_k - 1, 
+      len_k - tf.shape(qe)[2] - 1, 
+      delta=-1
+    )
+    mask = tf.sequence_mask(range_tensor, len_k)
     mask = tf.logical_not(mask)
     mask = tf.cast(mask, tf.float32)
-    return mask * qe
+
+    return tf.where(mask, qe, tf.zeros_like(qe))
 
   def _skewing(self, tensor):
     padded = tf.pad(tensor, [[0, 0], [0, 0], [0, 0], [1, 0]])
     reshaped = tf.reshape(padded, [-1, padded.shape[1], padded.shape[-1], padded.shape[-2]])
     Srel = reshaped[:, :, 1:, :]
     return Srel[:, :, :, :tensor.shape[-1]]
+  
+  def compute_output_shape(self, input_shape):
+    # input_shape [q, k, v]
+    q_shape, _, _ = input_shape 
+    output_shape = q_shape  # attention output & q same shape
+    attention_weights_shape = (q_shape[0], self.h, q_shape[1], q_shape[1])
+    return output_shape, attention_weights_shape
 
 
 class TransformerDecoderLayer(tf.keras.layers.Layer):
@@ -347,6 +375,15 @@ class TransformerDecoderLayer(tf.keras.layers.Layer):
 
   def call(self, x, encoder_output=None, mask=None, lookahead_mask=None, training=False, return_attention=False):
     # Self-attention
+    print(f"Input shape x: {x.shape}")
+    if x.shape[-1] != self.self_attention.d:
+      raise ValueError(f"Input feature dimension {x.shape[-1]} does not match expected d_model {self.self_attention.d}")
+    # print("input x:", x)
+    # # input x: Tensor("while/while/strided_slice:0", shape=(512, ?, 90), dtype=float32)
+    # print("[x, x, x]:", [x, x, x])
+    # [x, x, x]: [<tf.Tensor 'while/while/strided_slice:0' shape=(512, ?, 90) dtype=float32>, 
+    # <tf.Tensor 'while/while/strided_slice:0' shape=(512, ?, 90) dtype=float32>, 
+    # <tf.Tensor 'while/while/strided_slice:0' shape=(512, ?, 90) dtype=float32>]
     self_attn_out, self_attn_weights = self.self_attention([x, x, x], mask=lookahead_mask)
     self_attn_out = self.dropout1(self_attn_out, training=training)
     out1 = self.layernorm1(self_attn_out + x)
@@ -370,6 +407,10 @@ class TransformerDecoderLayer(tf.keras.layers.Layer):
       return out, self_attn_weights, enc_dec_attn_weights
     else:
       return out
+  
+  def compute_output_shape(self, input_shape):
+    # input_shape: (batch_size, seq_len, d_model)
+    return input_shape
 
 
 class TransformerDecoder(base_model.BaseDecoder):
@@ -389,6 +430,8 @@ class TransformerDecoder(base_model.BaseDecoder):
     self.embedding = tf.keras.layers.Embedding(input_dim=d_model, output_dim=d_model)
     self.positional_encoding = self._create_positional_encoding(max_seq_len, d_model)
     self.dropout = tf.keras.layers.Dropout(dropout_rate)
+
+    self.input_projection = tf.keras.layers.Dense(d_model)
 
     # Transformer decoder layers
     self.layers = [
@@ -437,30 +480,60 @@ class TransformerDecoder(base_model.BaseDecoder):
     Returns:
         logits: Output logits of shape `[batch_size, seq_len, d_model]`.
     """
+    x = self.input_projection(x)
+
     seq_len = tf.shape(x)[1]
     step_size = window_size - overlap
 
-    outputs = []
-    start = 0
+    # outputs = tf.TensorArray(
+    #   dtype=tf.float32,
+    #   size=0,
+    #   dynamic_size=True,
+    #   element_shape=tf.TensorShape([None, self.d_model])
+    # )
+    outputs = tf.TensorArray(tf.float32, size=0, dynamic_size=True, 
+                             element_shape=(512, None, 256))
+    start = tf.constant(0)
 
-    while start < seq_len:
-      end = min(start + window_size, seq_len)
+    def condition(start, outputs):
+      return start < seq_len
+
+    def body(start, outputs):
+      end = tf.minimum(start + window_size, seq_len)
       chunk = x[:, start:end, :]
       chunk_lookahead_mask = self._create_lookahead_mask(end - start)
 
       # Decode the current chunk
       chunk_output = chunk
       for layer in self.layers:
-          chunk_output = layer(chunk_output, encoder_output, mask, chunk_lookahead_mask, training)
+        chunk_output = layer(chunk_output, encoder_output, mask, chunk_lookahead_mask, training)
+      
+      # print("chunk_output shape:", chunk_output.shape)  # chunk_output shape: (512, ?, 256)
+      chunk_output = tf.ensure_shape(chunk_output, (512, None, self.d_model))
 
-      outputs.append(chunk_output)
+      tf.print("chunk_output shape:", tf.shape(chunk_output))
+      tf.print("outputs shape before write:", outputs.size())
+
+      outputs = outputs.write(start // step_size, chunk_output)
       start += step_size
-
+      return start, outputs
+    
+    start, outputs = tf.while_loop(
+      cond=condition,
+      body=body,
+      loop_vars=[start, outputs],
+      shape_invariants=[
+        start.get_shape(),
+        tf.TensorShape(None)  # Dynamic size for TensorArray
+      ]
+    )
+    
     # Concatenate outputs from all windows
-    outputs = tf.concat(outputs, axis=1)
+    outputs = outputs.concat()
 
     # Project final output to the desired dimension
     logits = self.output_layer(outputs)
+
     return logits
 
   def sample(self, n, max_length=None, z=None, c_input=None, temperature=1.0, start_inputs=None, end_fn=None, window_size=128, overlap=0):
@@ -525,47 +598,61 @@ class TransformerDecoder(base_model.BaseDecoder):
     step_size = window_size - overlap
 
     # Initialize loss and logits storage
-    total_loss = []
-    all_logits = []
+    total_loss = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
+    all_logits = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
 
-    start = 0
-    while start < seq_len:
-      end = min(start + window_size, seq_len)
+    start = tf.constant(0)
 
-      # Extract the current window for input and target
+    def condition(start, total_loss, all_logits):
+      return start < seq_len
+    
+    def body(start, total_loss, all_logits):
+      end = tf.minimum(start + window_size, seq_len)
+
       x_input_window = x_input[:, start:end, :]
       x_target_window = x_target[:, start:end, :]
 
-      # Generate lookahead mask for the current window
       lookahead_mask = self._create_lookahead_mask(end - start)
 
       # Decode the current window
+      # print("x_input_window:", x_input_window)  # x_input_window: Tensor("while/strided_slice:0", shape=(512, ?, 90), dtype=float32)
+      # print("encoder_output:", c_input)  # encoder_output: None
+      # print("window_size:", window_size)  # window_size: 128
       logits_window = self.call(
-        x_input_window, encoder_output=c_input, lookahead_mask=lookahead_mask, training=True,
-        window_size=window_size, overlap=overlap
+          x_input_window, encoder_output=c_input, lookahead_mask=lookahead_mask, training=True,
+          window_size=window_size, overlap=overlap
       )
 
       # Compute loss for the current window
       loss_window = tf.nn.softmax_cross_entropy_with_logits(
-        labels=x_target_window, logits=logits_window
+          labels=x_target_window, logits=logits_window
       )
-      total_loss.append(tf.reduce_mean(loss_window, axis=-1))  # Append per-sequence loss
-      all_logits.append(logits_window)
+      total_loss = total_loss.write(start // step_size, tf.reduce_mean(loss_window, axis=-1))
+      all_logits = all_logits.write(start // step_size, logits_window)
 
       start += step_size
+      return start, total_loss, all_logits
+
+    start, total_loss, all_logits = tf.while_loop(condition, body, [start, total_loss, all_logits])
 
     # Concatenate logits from all windows for metrics
-    all_logits = tf.concat(all_logits, axis=1)
+    all_logits = all_logits.concat()
 
     # Combine loss across windows
-    r_loss = tf.reduce_mean(tf.concat(total_loss, axis=-1))
+    r_loss = tf.reduce_mean(total_loss.concat())
 
     # Metrics for logging
     metric_map = {
-        'metrics/reconstruction_loss': (tf.reduce_mean(r_loss), tf.no_op())
+      'metrics/reconstruction_loss': (tf.reduce_mean(r_loss), tf.no_op())
     }
 
     return r_loss, metric_map, all_logits
+
+  def compute_output_shape(self, input_shape):
+    # (batch_size, seq_len, d_model)
+    batch_size = input_shape[0]
+    seq_len = input_shape[1]
+    return (batch_size, seq_len, self.d_model)
 
 
 class BaseLstmDecoder(base_model.BaseDecoder):
